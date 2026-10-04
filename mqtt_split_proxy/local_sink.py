@@ -34,15 +34,16 @@ class LocalSink:
         # Wildcards and separators from IDs must not leak into the topic.
         return value.replace("/", "_").replace("+", "_").replace("#", "_") or "_"
 
-    def topic_for(self, client_id: str, username: str | None, topic: str) -> str:
+    def topic_for(self, vendor: str, client_id: str, username: str | None, topic: str) -> str:
         prefix = self.cfg.topic_prefix.format(
-            client_id=self._clean(client_id), username=self._clean(username or ""))
+            vendor=self._clean(vendor), client_id=self._clean(client_id),
+            username=self._clean(username or ""))
         return prefix + topic
 
-    def offer(self, client_id: str, username: str | None,
+    def offer(self, vendor: str, client_id: str, username: str | None,
               topic: str, payload: bytes, retain: bool) -> bool:
         """Queue a message for the local broker. Never blocks."""
-        item = _Item(self.topic_for(client_id, username, topic), payload,
+        item = _Item(self.topic_for(vendor, client_id, username, topic), payload,
                      retain and not self.cfg.strip_retain)
         try:
             self.queue.put_nowait(item)

@@ -12,19 +12,38 @@ import ssl
 from . import config as config_mod
 from .config import Config
 from .local_sink import LocalSink
+from .routing import Router
 from .session import Proxy
 from .upstream import make_client_context
 
 log = logging.getLogger("mqtt_split_proxy")
 
 
-def make_server_context(cfg: Config) -> ssl.SSLContext:
+def _server_context(cfg: Config, cert: str, key: str) -> ssl.SSLContext:
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    ctx.load_cert_chain(cfg.listen.cert, cfg.listen.key)
+    ctx.load_cert_chain(cert, key)
     ctx.minimum_version = ssl.TLSVersion[cfg.listen.tls_min_version]
     if ctx.minimum_version < ssl.TLSVersion.TLSv1_2:
         # Old devices often only offer legacy ciphers as well.
         ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+    return ctx
+
+
+def make_server_context(cfg: Config, router: Router) -> ssl.SSLContext:
+    """Default context; an SNI callback records the requested server name for
+    routing and switches to an upstream's own certificate if it has one."""
+    ctx = _server_context(cfg, cfg.listen.cert, cfg.listen.key)
+    per_upstream = {u.name: _server_context(cfg, u.cert, u.key)
+                    for u in cfg.upstreams if u.cert is not None}
+
+    def on_sni(sslobj: ssl.SSLObject, server_name: str | None, _ctx: ssl.SSLContext) -> None:
+        sslobj.sni = server_name  # read back in Session via get_extra_info("ssl_object")
+        if server_name is not None:
+            up = router.for_sni(server_name)
+            if up is not None and up.name in per_upstream:
+                sslobj.context = per_upstream[up.name]
+
+    ctx.sni_callback = on_sni
     return ctx
 
 
@@ -33,9 +52,10 @@ async def _stats_loop(proxy: Proxy, sink: LocalSink, interval: float) -> None:
         await asyncio.sleep(interval)
         s = proxy.stats
         log.info("stats: active=%d sessions=%d tapped=%d tap_errors=%d local_ok=%d "
-                 "local_dropped=%d local_queue=%d local_connected=%s upstream_failures=%d",
+                 "local_dropped=%d local_queue=%d local_connected=%s upstream_failures=%d "
+                 "unrouted=%d",
                  s.active, s.sessions, s.tapped, s.tap_errors, sink.ok, sink.dropped,
-                 sink.queue.qsize(), sink.connected, s.upstream_failures)
+                 sink.queue.qsize(), sink.connected, s.upstream_failures, s.unrouted)
 
 
 async def serve(cfg: Config, stop: asyncio.Event,
@@ -45,14 +65,17 @@ async def serve(cfg: Config, stop: asyncio.Event,
     ``started`` (tests) receives ``(proxy, sink, server)`` once listening.
     """
     sink = LocalSink(cfg.local_broker)
-    proxy = Proxy(cfg, sink, make_client_context(cfg.upstream))
+    proxy = Proxy(cfg, sink, {u.name: make_client_context(u) for u in cfg.upstreams})
     server = await asyncio.start_server(
         proxy.handle_client, cfg.listen.host, cfg.listen.port,
-        ssl=make_server_context(cfg), ssl_handshake_timeout=15)
+        ssl=make_server_context(cfg, proxy.router), ssl_handshake_timeout=15)
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
     if cfg.log_credentials:
         log.warning("log_credentials is ON: device passwords will be written to the log")
-    log.info("listening on %s -> upstream %s:%d", addrs, cfg.upstream.host, cfg.upstream.port)
+    log.info("listening on %s", addrs)
+    for u in cfg.upstreams:
+        log.info("upstream %s: %s:%d%s", u.name, u.host, u.port,
+                 " (default)" if u.name == cfg.default else "")
 
     bg = [asyncio.create_task(sink.run(), name="sink"),
           asyncio.create_task(_stats_loop(proxy, sink, cfg.stats_interval), name="stats")]

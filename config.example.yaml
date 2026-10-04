@@ -7,6 +7,7 @@ listen:
   key: certs/server.key
   tls_min_version: TLSv1_2   # lower to TLSv1 only if the device can't do 1.2
 
+# --- Single vendor ---------------------------------------------------------
 upstream:
   host: mqtt.vendor.example  # real hostname (SNI + certificate verification)
   port: 8883
@@ -18,13 +19,43 @@ upstream:
   # cafile: /path/to/ca.pem  # only needed if the vendor uses a private CA
   connect_timeout: 10
 
+# --- Several vendors (use instead of `upstream:`) ---------------------------
+# Point every vendor hostname at this proxy in DNS. Each device is routed to
+# the first upstream with a matching rule, otherwise to `default`; with no
+# default, unmatched devices are disconnected.
+#
+# A rule matches if ALL of its conditions hold; `match` may be a list of
+# rules, and ANY of them selects the upstream.
+#   sni:        glob(s) on the TLS server name the device asked for
+#               (case-insensitive; some devices send no SNI)
+#   client_id:  regex searched in the MQTT client id
+#   username:   regex searched in the MQTT username
+#
+# upstreams:
+#   - name: vendor-a                 # becomes {vendor} in topic_prefix
+#     host: mqtt.vendor-a.example
+#     resolver: 1.1.1.1
+#     match: {sni: "mqtt.vendor-a.example"}
+#   - name: vendor-b
+#     host: broker.vendor-b.example
+#     resolver: 1.1.1.1
+#     match:
+#       - sni: "*.vendor-b.example"
+#       - client_id: "^VB-"          # for devices that don't send SNI
+#     # Optional: certificate shown to devices whose SNI matches this upstream
+#     # (default: listen.cert/key). Create with: certs/gen_selfsigned.sh <host> certs/vendor-b
+#     cert: certs/vendor-b/server.crt
+#     key: certs/vendor-b/server.key
+# default: vendor-a
+
 local_broker:
   host: 127.0.0.1
   port: 1883
   username: null
   password: null
   client_id: mqtt-split-proxy
-  topic_prefix: "vendor/{client_id}/"   # placeholders: {client_id}, {username}
+  topic_prefix: "vendor/{client_id}/"   # placeholders: {vendor}, {client_id}, {username}
+                                        # several vendors: e.g. "{vendor}/{client_id}/"
   qos: 0
   strip_retain: false
   queue_size: 10000

@@ -26,6 +26,7 @@ from paho.mqtt.properties import Properties
 
 from mqtt_split_proxy.__main__ import serve
 from mqtt_split_proxy.config import from_dict
+from mqtt_split_proxy.mqtt_codec import encode_varint
 
 ROOT = Path(__file__).resolve().parent.parent
 USER, PASSWORD = "U", "P"
@@ -166,9 +167,7 @@ def certs(tmp_path_factory) -> Path:
     return d
 
 
-@pytest.fixture(scope="session")
-def cloud(certs, tmp_path_factory):
-    d = tmp_path_factory.mktemp("cloud")
+def make_cloud(certs: Path, d: Path) -> Broker:
     tls_port, plain_port = free_port(), free_port()
     (d / "passwd").write_text(f"{USER}:{mosquitto_hash(PASSWORD)}\n")
     (d / "passwd").chmod(0o600)
@@ -185,6 +184,20 @@ listener {plain_port} 127.0.0.1
 """
     b = Broker(d, conf, [tls_port, plain_port], mounts=(certs,))
     b.tls_port, b.plain_port = tls_port, plain_port
+    return b
+
+
+@pytest.fixture(scope="session")
+def cloud(certs, tmp_path_factory):
+    b = make_cloud(certs, tmp_path_factory.mktemp("cloud"))
+    yield b
+    b.stop()
+
+
+@pytest.fixture(scope="session")
+def cloud_b(certs, tmp_path_factory):
+    """Second fake vendor cloud for routing tests."""
+    b = make_cloud(certs, tmp_path_factory.mktemp("cloud_b"))
     yield b
     b.stop()
 
@@ -199,19 +212,21 @@ def local(tmp_path):
     b.stop()
 
 
-@pytest.fixture
-async def proxy(certs, cloud, local, request):
-    overrides = getattr(request, "param", {})
+def upstream_to(cloud: Broker, certs: Path, **extra) -> dict:
+    return {"host": "localhost", "port": cloud.tls_port, "address": "127.0.0.1",
+            "verify": True, "cafile": str(certs / "ca.crt"), **extra}
+
+
+@contextlib.asynccontextmanager
+async def running_proxy(certs: Path, local: Broker, **cfg_data):
     port = free_port()
     cfg = from_dict({
         "listen": {"host": "127.0.0.1", "port": port,
                    "cert": str(certs / "server.crt"), "key": str(certs / "server.key")},
-        "upstream": {"host": "localhost", "port": cloud.tls_port, "address": "127.0.0.1",
-                     "verify": True, "cafile": str(certs / "ca.crt")},
         "local_broker": {"host": "127.0.0.1", "port": local.port,
-                         "queue_size": overrides.get("queue_size", 1000)},
+                         **cfg_data.pop("local_broker", {})},
         "stats_interval": 3600,
-        "log_credentials": overrides.get("log_credentials", False),
+        **cfg_data,
     })
     stop = asyncio.Event()
     started = asyncio.get_running_loop().create_future()
@@ -219,9 +234,21 @@ async def proxy(certs, cloud, local, request):
     p, sink, _server = await asyncio.wait_for(started, 5)
     await wait_for(lambda: sink.connected, 10, "local sink connected")
     p.port = port
-    yield p
-    stop.set()
-    await asyncio.wait_for(task, 10)
+    try:
+        yield p
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 10)
+
+
+@pytest.fixture
+async def proxy(certs, cloud, local, request):
+    overrides = getattr(request, "param", {})
+    async with running_proxy(
+            certs, local, upstream=upstream_to(cloud, certs),
+            local_broker={"queue_size": overrides.get("queue_size", 1000)},
+            log_credentials=overrides.get("log_credentials", False)) as p:
+        yield p
 
 
 def pub_args(certs: Path, *extra: str) -> list[str]:
@@ -328,3 +355,110 @@ async def test_log_credentials_option(proxy, cloud, local, certs, caplog, shown)
     assert rc == 0, out
     assert (f"username='{USER}' password='{PASSWORD}'" in caplog.text) is shown
     assert ("password=" in caplog.text) is shown
+
+
+# --- multi-vendor routing ---------------------------------------------------
+
+def _str(s: str) -> bytes:
+    b = s.encode()
+    return len(b).to_bytes(2, "big") + b
+
+
+def _pkt(first: int, body: bytes) -> bytes:
+    return bytes([first]) + encode_varint(len(body)) + body
+
+
+async def raw_publish(port: int, sni: str | None, client_id: str, topic: str, payload: bytes,
+                      ctx: ssl.SSLContext | None = None) -> int | None:
+    """Minimal MQTT 3.1.1 client with full control over the TLS SNI.
+
+    Returns the CONNACK return code, or None if the proxy closed the connection.
+    """
+    if ctx is None:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    r, w = await asyncio.open_connection("127.0.0.1", port, ssl=ctx, server_hostname=sni)
+    try:
+        w.write(_pkt(0x10, _str("MQTT") + bytes([4, 0xC2]) + (30).to_bytes(2, "big")
+                     + _str(client_id) + _str(USER) + _str(PASSWORD)))
+        await w.drain()
+        connack = await asyncio.wait_for(r.read(4), 10)
+        if len(connack) < 4:
+            return None
+        if connack[3] == 0:
+            w.write(_pkt(0x30, _str(topic) + payload) + b"\xe0\x00")  # PUBLISH, DISCONNECT
+            await w.drain()
+            await asyncio.wait_for(r.read(), 10)  # broker closes after DISCONNECT
+        return connack[3]
+    finally:
+        w.close()
+        with contextlib.suppress(Exception):
+            await w.wait_closed()
+
+
+@pytest.fixture(scope="session")
+def vendor_b_cert(tmp_path_factory) -> Path:
+    d = tmp_path_factory.mktemp("cert_b")
+    subprocess.run(["sh", str(ROOT / "certs" / "gen_selfsigned.sh"), "broker.vendor-b.test",
+                    str(d), "2"], check=True, capture_output=True)
+    return d
+
+
+@pytest.fixture
+async def multi_proxy(certs, cloud, cloud_b, local, vendor_b_cert):
+    async with running_proxy(
+            certs, local,
+            upstreams=[
+                upstream_to(cloud, certs, name="vendor-a",
+                            match={"sni": "*.vendor-a.test"}),
+                upstream_to(cloud_b, certs, name="vendor-b",
+                            match=[{"sni": "broker.vendor-b.test"}, {"client_id": "^VB-"}],
+                            cert=str(vendor_b_cert / "server.crt"),
+                            key=str(vendor_b_cert / "server.key")),
+            ],
+            local_broker={"topic_prefix": "{vendor}/{client_id}/"}) as p:
+        yield p
+
+
+@pytest.mark.parametrize("sni,client_id,vendor", [
+    ("mqtt.vendor-a.test", "dev-a", "vendor-a"),
+    ("broker.vendor-b.test", "dev-b", "vendor-b"),
+    (None, "VB-0001", "vendor-b"),                  # no SNI: routed by client_id
+])
+async def test_routes_to_matching_vendor(multi_proxy, cloud, cloud_b, local,
+                                         sni, client_id, vendor):
+    kw = {"username": USER, "password": PASSWORD}
+    async with collector(cloud.plain_port, "route/#", **kw) as at_a, \
+            collector(cloud_b.plain_port, "route/#", **kw) as at_b, \
+            collector(local.port, "+/+/route/#") as at_local:
+        rc = await raw_publish(multi_proxy.port, sni, client_id, "route/t", b"hello")
+        assert rc == 0
+        target, other = (at_a, at_b) if vendor == "vendor-a" else (at_b, at_a)
+        await wait_for(lambda: target and at_local, what="routed message")
+        await asyncio.sleep(0.3)
+    assert target == [("route/t", b"hello", False)]
+    assert other == []
+    assert at_local == [(f"{vendor}/{client_id}/route/t", b"hello", False)]
+
+
+async def test_unmatched_device_is_rejected_without_default(multi_proxy, cloud, cloud_b):
+    rc = await raw_publish(multi_proxy.port, "other.example", "dev-x", "route/t", b"x")
+    assert rc is None
+    assert multi_proxy.stats.unrouted == 1
+    assert multi_proxy.stats.upstream_failures == 0
+
+
+async def test_per_vendor_certificate_by_sni(multi_proxy, vendor_b_cert, certs):
+    def verifying(cafile: Path) -> ssl.SSLContext:
+        ctx = ssl.create_default_context(cafile=str(cafile))
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT  # self-signed leaf as trust anchor
+        return ctx
+
+    # vendor-b's SNI gets vendor-b's certificate ...
+    assert await raw_publish(multi_proxy.port, "broker.vendor-b.test", "dev-b", "route/c", b"1",
+                             ctx=verifying(vendor_b_cert / "server.crt")) == 0
+    # ... while vendor-a has none configured and gets the listener default.
+    with pytest.raises(ssl.SSLCertVerificationError):
+        await raw_publish(multi_proxy.port, "mqtt.vendor-a.test", "dev-a", "route/c", b"1",
+                          ctx=verifying(vendor_b_cert / "server.crt"))

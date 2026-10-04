@@ -33,6 +33,25 @@ python -m mqtt_split_proxy -c config.yaml
    `/opt/mqtt-split-proxy` and config in `/etc/mqtt-split-proxy/`), or `deploy/Dockerfile`.
 3. **Consume:** `mosquitto_sub -t 'vendor/#' -v`, Home Assistant, Node-RED, …
 
+## Several vendors
+
+One instance can serve devices of different vendors. Point every vendor hostname at
+the proxy in DNS and replace `upstream:` with an `upstreams:` list (see
+`config.example.yaml`). Each device goes to the first upstream with a matching rule,
+or else to `default`. If there's no default, unmatched devices are disconnected and
+counted as `unrouted` in the stats.
+
+Rules can match on:
+- `sni`: the hostname the device asked for in the TLS handshake (glob)
+- `client_id` and `username`: regexes on the device's CONNECT
+
+All conditions in a rule must hold, and any rule in a `match` list selects the upstream.
+Some devices send no SNI, so add a `client_id` or `username` rule for those.
+
+Use `{vendor}` in `local_broker.topic_prefix` (e.g. `"{vendor}/{client_id}/"`) to keep
+the local topics apart. An upstream can also set its own `cert`/`key`, which is shown
+to devices whose SNI matches it.
+
 The device's username and password pass through the proxy in cleartext. By default the
 password is never logged and the username appears only at DEBUG level. For debugging,
 `log_credentials: true` (or `--log-credentials`) logs both at INFO for every CONNECT;
@@ -42,14 +61,15 @@ and keep `upstream.verify: true`.
 ## Tests
 
 ```sh
-pytest tests/test_codec.py   # pure codec tests
+pytest tests/test_codec.py tests/test_routing.py   # pure unit tests
 pytest tests/test_e2e.py     # needs mosquitto (or Docker + eclipse-mosquitto:2), mosquitto_pub, openssl
 ```
 
 The E2E suite starts a fake "cloud" Mosquitto (TLS + password auth, test CA), a "local"
 Mosquitto, and the proxy in-process. It checks QoS 0/1/2 over 3.1.1 and 5.0, retain,
 v5 topic aliases plus a 300 kB payload, that a bad-password CONNACK reaches the client,
-and that cloud delivery continues while the local broker is down.
+that cloud delivery continues while the local broker is down, and routing between two
+fake vendor clouds by SNI and by client_id, including per-vendor certificates.
 
 ## Known limits
 

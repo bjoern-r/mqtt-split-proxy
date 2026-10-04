@@ -11,8 +11,9 @@ from dataclasses import dataclass
 
 from . import mqtt_codec as codec
 from . import upstream
-from .config import Config
+from .config import Config, UpstreamConfig
 from .local_sink import LocalSink
+from .routing import Router
 
 log = logging.getLogger(__name__)
 
@@ -36,13 +37,16 @@ class Stats:
     tapped: int = 0
     tap_errors: int = 0
     upstream_failures: int = 0
+    unrouted: int = 0
 
 
 class Proxy:
-    def __init__(self, cfg: Config, sink: LocalSink, upstream_ctx: ssl.SSLContext):
+    def __init__(self, cfg: Config, sink: LocalSink,
+                 upstream_ctxs: dict[str, ssl.SSLContext]):
         self.cfg = cfg
         self.sink = sink
-        self.upstream_ctx = upstream_ctx
+        self.router = Router(cfg)
+        self.upstream_ctxs = upstream_ctxs  # by upstream name
         self.stats = Stats()
 
     async def handle_client(self, reader: asyncio.StreamReader,
@@ -67,6 +71,9 @@ class Session:
         peer = writer.get_extra_info("peername")
         self.peer = f"{peer[0]}:{peer[1]}" if peer else "?"
         self.info: codec.ConnectInfo | None = None
+        self.route: UpstreamConfig | None = None
+        # Set by the SNI callback in __main__.make_server_context.
+        self.sni: str | None = getattr(writer.get_extra_info("ssl_object"), "sni", None)
         self.alias_map: dict[int, str] = {}
         self.bytes_up = 0
         self.bytes_down = 0
@@ -82,8 +89,9 @@ class Session:
             if self.u_writer is not None:
                 await self._close(self.u_writer)
             if self.info is not None:
-                log.info("session %s client_id=%r closed after %.0fs: up=%dB down=%dB publishes=%d",
-                         self.peer, self.info.client_id, time.monotonic() - start,
+                log.info("session %s client_id=%r vendor=%s closed after %.0fs: up=%dB down=%dB publishes=%d",
+                         self.peer, self.info.client_id,
+                         self.route.name if self.route else "-", time.monotonic() - start,
                          self.bytes_up, self.bytes_down, self.publishes)
 
     async def _run(self) -> None:
@@ -103,20 +111,31 @@ class Session:
         except codec.ProtocolError as e:
             log.info("%s: undecodable CONNECT (%s), closing", self.peer, e)
             return
-        log.info("%s: CONNECT client_id=%r mqtt_level=%d keepalive=%d",
-                 self.peer, self.info.client_id, self.info.version, self.info.keepalive)
+        log.info("%s: CONNECT client_id=%r mqtt_level=%d keepalive=%d sni=%s",
+                 self.peer, self.info.client_id, self.info.version, self.info.keepalive,
+                 self.sni or "-")
         if self.cfg.log_credentials:
             log.info("%s: CREDENTIALS client_id=%r username=%r password=%s", self.peer,
                      self.info.client_id, self.info.username, _show(self.info.password))
         else:
             log.debug("%s: username=%r", self.peer, self.info.username)
 
+        self.route = self.proxy.router.select(self.sni, self.info.client_id,
+                                              self.info.username)
+        if self.route is None:
+            self.proxy.stats.unrouted += 1
+            log.warning("%s: no upstream matches sni=%s client_id=%r and no default; closing",
+                        self.peer, self.sni or "-", self.info.client_id)
+            return
+        log.info("%s: routing to %s (%s:%d)", self.peer, self.route.name,
+                 self.route.host, self.route.port)
+
         try:
-            u_reader, self.u_writer = await upstream.connect(self.cfg.upstream,
-                                                             self.proxy.upstream_ctx)
+            u_reader, self.u_writer = await upstream.connect(
+                self.route, self.proxy.upstream_ctxs[self.route.name])
         except (upstream.UpstreamError, OSError) as e:
             self.proxy.stats.upstream_failures += 1
-            log.warning("%s: upstream connect failed: %s", self.peer, e)
+            log.warning("%s: upstream %s connect failed: %s", self.peer, self.route.name, e)
             return
 
         self.u_writer.write(pkt.raw)
@@ -186,7 +205,7 @@ class Session:
             await writer.drain()
 
     def _tap(self, flags: int, body: bytes, full: bool) -> None:
-        assert self.info is not None
+        assert self.info is not None and self.route is not None
         try:
             pub = codec.parse_publish(flags, body, self.info.version, self.alias_map)
         except codec.ProtocolError as e:
@@ -200,7 +219,7 @@ class Session:
             return
         self.publishes += 1
         self.proxy.stats.tapped += 1
-        self.proxy.sink.offer(self.info.client_id, self.info.username,
+        self.proxy.sink.offer(self.route.name, self.info.client_id, self.info.username,
                               pub.topic, pub.payload, pub.retain)
 
     @staticmethod
