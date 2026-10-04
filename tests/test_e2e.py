@@ -211,6 +211,7 @@ async def proxy(certs, cloud, local, request):
         "local_broker": {"host": "127.0.0.1", "port": local.port,
                          "queue_size": overrides.get("queue_size", 1000)},
         "stats_interval": 3600,
+        "log_credentials": overrides.get("log_credentials", False),
     })
     stop = asyncio.Event()
     started = asyncio.get_running_loop().create_future()
@@ -317,3 +318,13 @@ async def test_local_broker_down_does_not_affect_cloud(proxy, cloud, local, cert
     assert [p for _, p, _ in at_cloud] == [str(i).encode() for i in range(n)]
     assert proxy.stats.tapped == n
     assert sink.dropped >= n - 4
+
+
+@pytest.mark.parametrize("proxy,shown", [({"log_credentials": True}, True),
+                                         ({}, False)], indirect=["proxy"])
+async def test_log_credentials_option(proxy, cloud, local, certs, caplog, shown):
+    caplog.set_level("DEBUG", logger="mqtt_split_proxy")
+    rc, out = await run_pub(proxy, certs, "-t", "x", "-m", "y")
+    assert rc == 0, out
+    assert (f"username='{USER}' password='{PASSWORD}'" in caplog.text) is shown
+    assert ("password=" in caplog.text) is shown

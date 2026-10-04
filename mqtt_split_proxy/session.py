@@ -19,6 +19,16 @@ log = logging.getLogger(__name__)
 CHUNK = 65536
 
 
+def _show(secret: bytes | None) -> str:
+    """Render a binary password: quoted text if valid UTF-8, else hex."""
+    if secret is None:
+        return "<none>"
+    try:
+        return repr(secret.decode("utf-8"))
+    except UnicodeDecodeError:
+        return "hex:" + secret.hex()
+
+
 @dataclass
 class Stats:
     active: int = 0
@@ -95,7 +105,11 @@ class Session:
             return
         log.info("%s: CONNECT client_id=%r mqtt_level=%d keepalive=%d",
                  self.peer, self.info.client_id, self.info.version, self.info.keepalive)
-        log.debug("%s: username=%r", self.peer, self.info.username)
+        if self.cfg.log_credentials:
+            log.info("%s: CREDENTIALS client_id=%r username=%r password=%s", self.peer,
+                     self.info.client_id, self.info.username, _show(self.info.password))
+        else:
+            log.debug("%s: username=%r", self.peer, self.info.username)
 
         try:
             u_reader, self.u_writer = await upstream.connect(self.cfg.upstream,

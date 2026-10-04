@@ -33,3 +33,6 @@ connect_timeout: 30        # seconds a device may take to send its CONNECT
 tap_max_packet: 1048576    # larger PUBLISHes are relayed but not copied locally
 stats_interval: 60
 log_level: INFO
+# Debugging only: log each device's username and password in cleartext
+# (same as the --log-credentials command-line flag).
+log_credentials: false

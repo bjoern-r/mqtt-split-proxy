@@ -33,8 +33,10 @@ python -m mqtt_split_proxy -c config.yaml
    `/opt/mqtt-split-proxy` and config in `/etc/mqtt-split-proxy/`), or `deploy/Dockerfile`.
 3. **Consume:** `mosquitto_sub -t 'vendor/#' -v`, Home Assistant, Node-RED, …
 
-The device's username and password pass through the proxy in cleartext. They are never
-logged; the username appears only at DEBUG level. Bind `listen.host` to the LAN interface,
+The device's username and password pass through the proxy in cleartext. By default the
+password is never logged and the username appears only at DEBUG level. For debugging,
+`log_credentials: true` (or `--log-credentials`) logs both at INFO for every CONNECT;
+turn it off again afterwards. Bind `listen.host` to the LAN interface,
 and keep `upstream.verify: true`.
 
 ## Tests

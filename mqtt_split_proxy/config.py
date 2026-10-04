@@ -56,6 +56,7 @@ class Config:
     tap_max_packet: int = 1024 * 1024
     stats_interval: float = 60.0
     log_level: str = "INFO"
+    log_credentials: bool = False
 
 
 def _build(cls: type, data: dict[str, Any] | None, where: str) -> Any:

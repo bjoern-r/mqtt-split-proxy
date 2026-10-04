@@ -126,13 +126,13 @@ def test_parse_connect(version):
                         v5props=bytes([0x11]) + (60).to_bytes(4, "big")
                         + bytes([0x26]) + s("k") + s("v"))
     info = c.parse_connect(body)
-    assert info == c.ConnectInfo(version, "sensor-42", "user", 30, True)
+    assert info == c.ConnectInfo(version, "sensor-42", "user", 30, True, b"secret")
     assert "secret" not in repr(info)
 
 
 def test_parse_connect_no_credentials():
     info = c.parse_connect(connect_body(client_id="", username=None, password=None))
-    assert info.client_id == "" and info.username is None
+    assert info.client_id == "" and info.username is None and info.password is None
 
 
 def test_parse_connect_bad():

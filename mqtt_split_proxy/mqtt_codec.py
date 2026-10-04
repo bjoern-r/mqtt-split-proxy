@@ -7,7 +7,7 @@ CONNECT and PUBLISH. Everything here is read-only; packets are never rebuilt.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 CONNECT = 1
 CONNACK = 2
@@ -44,7 +44,8 @@ class ConnectInfo:
     username: str | None
     keepalive: int
     clean: bool
-    # The password is deliberately not stored.
+    # Kept out of repr() so it can't leak through casual logging.
+    password: bytes | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -218,9 +219,8 @@ def parse_connect(body: bytes) -> ConnectInfo:
         buf.string()   # will topic
         buf.binary()   # will payload
     username = buf.string() if flags & 0x80 else None
-    if flags & 0x40:
-        buf.binary()   # password: consumed, never kept
-    return ConnectInfo(version, client_id, username, keepalive, bool(flags & 0x02))
+    password = buf.binary() if flags & 0x40 else None
+    return ConnectInfo(version, client_id, username, keepalive, bool(flags & 0x02), password)
 
 
 def parse_publish(flags: int, body: bytes, version: int,

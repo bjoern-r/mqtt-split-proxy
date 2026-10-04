@@ -50,6 +50,8 @@ async def serve(cfg: Config, stop: asyncio.Event,
         proxy.handle_client, cfg.listen.host, cfg.listen.port,
         ssl=make_server_context(cfg), ssl_handshake_timeout=15)
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
+    if cfg.log_credentials:
+        log.warning("log_credentials is ON: device passwords will be written to the log")
     log.info("listening on %s -> upstream %s:%d", addrs, cfg.upstream.host, cfg.upstream.port)
 
     bg = [asyncio.create_task(sink.run(), name="sink"),
@@ -82,8 +84,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="mqtt-split-proxy", description=__doc__)
     ap.add_argument("-c", "--config", default="config.yaml")
     ap.add_argument("-v", "--verbose", action="store_true", help="force DEBUG logging")
+    ap.add_argument("--log-credentials", action="store_true",
+                    help="log the username and password each device sends (debugging only)")
     args = ap.parse_args()
     cfg = config_mod.load(args.config)
+    cfg.log_credentials |= args.log_credentials
     logging.basicConfig(
         level="DEBUG" if args.verbose else cfg.log_level.upper(),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
