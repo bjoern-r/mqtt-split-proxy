@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mqtt-split-proxy"
+version = "0.1.0"
+description = "Transparent MQTT/TLS relay that taps device->cloud PUBLISHes into a local broker"
+requires-python = ">=3.11"
+dependencies = [
+    "aiomqtt>=2.0",
+    "pyyaml>=6.0",
+    "dnspython>=2.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+mqtt-split-proxy = "mqtt_split_proxy.__main__:main"
+
+[tool.setuptools]
+packages = ["mqtt_split_proxy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
