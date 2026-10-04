@@ -1,0 +1,29 @@
+[Unit]
+Description=MQTT split proxy (device -> vendor cloud, copy to local Mosquitto)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mqtt-split-proxy
+Group=mqtt-split-proxy
+WorkingDirectory=/opt/mqtt-split-proxy
+ExecStart=/opt/mqtt-split-proxy/.venv/bin/python -m mqtt_split_proxy -c /etc/mqtt-split-proxy/config.yaml
+Restart=always
+RestartSec=5
+
+# Port 8883 > 1024, so no CAP_NET_BIND_SERVICE needed.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
