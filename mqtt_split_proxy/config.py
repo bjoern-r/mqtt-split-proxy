@@ -61,6 +61,7 @@ class LocalBrokerConfig:
     password: str | None = None
     client_id: str = "mqtt-split-proxy"
     topic_prefix: str = "vendor/{client_id}/"
+    topic_prefix_down: str = "vendor-down/{client_id}/"  # cloud->device copies (tap_downstream)
     qos: int = 0
     strip_retain: bool = False
     queue_size: int = 10000
@@ -78,6 +79,7 @@ class Config:
     local_broker: LocalBrokerConfig = field(default_factory=LocalBrokerConfig)
     connect_timeout: float = 30.0
     tap_max_packet: int = 1024 * 1024
+    tap_downstream: bool = False        # also copy cloud->device PUBLISHes
     stats_interval: float = 60.0
     log_level: str = "INFO"
     log_credentials: bool = False
@@ -183,11 +185,14 @@ def from_dict(data: dict[str, Any], base_dir: Path | None = None) -> Config:
 
     if cfg.local_broker.qos not in (0, 1, 2):
         raise ConfigError("local_broker.qos must be 0, 1 or 2")
-    try:
-        cfg.local_broker.topic_prefix.format(vendor="v", client_id="c", username="u")
-    except (KeyError, IndexError, ValueError) as e:
-        raise ConfigError(f"local_broker.topic_prefix: bad placeholder {e} "
-                          "(allowed: {vendor}, {client_id}, {username})") from None
+    for key in ("topic_prefix", "topic_prefix_down"):
+        try:
+            getattr(cfg.local_broker, key).format(vendor="v", client_id="c", username="u")
+        except (KeyError, IndexError, ValueError) as e:
+            raise ConfigError(f"local_broker.{key}: bad placeholder {e} "
+                              "(allowed: {vendor}, {client_id}, {username})") from None
+    if cfg.local_broker.topic_prefix_down == cfg.local_broker.topic_prefix:
+        raise ConfigError("local_broker.topic_prefix_down must differ from topic_prefix")
     if base_dir is not None:
         for ln in cfg.listen:
             ln.cert = _resolve_path(base_dir, ln.cert)

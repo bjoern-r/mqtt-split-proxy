@@ -34,16 +34,21 @@ class LocalSink:
         # Wildcards and separators from IDs must not leak into the topic.
         return value.replace("/", "_").replace("+", "_").replace("#", "_") or "_"
 
-    def topic_for(self, vendor: str, client_id: str, username: str | None, topic: str) -> str:
-        prefix = self.cfg.topic_prefix.format(
+    def topic_for(self, vendor: str, client_id: str, username: str | None, topic: str,
+                  down: bool = False) -> str:
+        template = self.cfg.topic_prefix_down if down else self.cfg.topic_prefix
+        prefix = template.format(
             vendor=self._clean(vendor), client_id=self._clean(client_id),
             username=self._clean(username or ""))
         return prefix + topic
 
     def offer(self, vendor: str, client_id: str, username: str | None,
-              topic: str, payload: bytes, retain: bool) -> bool:
-        """Queue a message for the local broker. Never blocks."""
-        item = _Item(self.topic_for(vendor, client_id, username, topic), payload,
+              topic: str, payload: bytes, retain: bool, down: bool = False) -> bool:
+        """Queue a message for the local broker. Never blocks.
+
+        ``down`` marks a cloud->device message, filed under ``topic_prefix_down``.
+        """
+        item = _Item(self.topic_for(vendor, client_id, username, topic, down), payload,
                      retain and not self.cfg.strip_retain)
         try:
             self.queue.put_nowait(item)

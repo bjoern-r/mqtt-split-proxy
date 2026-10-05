@@ -68,12 +68,19 @@ local_broker:
   client_id: mqtt-split-proxy
   topic_prefix: "vendor/{client_id}/"   # placeholders: {vendor}, {client_id}, {username}
                                         # several vendors: e.g. "{vendor}/{client_id}/"
+  # Prefix for cloud->device copies (only with tap_downstream: true).
+  # Must differ from topic_prefix.
+  topic_prefix_down: "vendor-down/{client_id}/"
   qos: 0
   strip_retain: false
   queue_size: 10000
 
 connect_timeout: 30        # seconds a device may take to send its CONNECT
 tap_max_packet: 1048576    # larger PUBLISHes are relayed but not copied locally
+# Also copy cloud->device PUBLISHes (commands, config pushes) to the local
+# broker under local_broker.topic_prefix_down. Off by default: it makes the
+# cloud->device path packet-framed instead of a plain byte copy.
+tap_downstream: false
 stats_interval: 60
 log_level: INFO
 # Debugging only: log each device's username and password in cleartext

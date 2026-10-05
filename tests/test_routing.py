@@ -51,6 +51,10 @@ def test_single_mapping_match_is_list_and_sni_normalized():
     ({"upstreams": [{"host": "a", "cert": "x.crt"}]}, "together"),
     ({"upstreams": [{"port": 1}]}, "host is required"),
     ({"upstream": {"host": "a"}, "local_broker": {"topic_prefix": "{vendr}/"}}, "placeholder"),
+    ({"upstream": {"host": "a"}, "local_broker": {"topic_prefix_down": "{x}/"}},
+     "topic_prefix_down: bad placeholder"),
+    ({"upstream": {"host": "a"}, "local_broker": {"topic_prefix": "v/", "topic_prefix_down": "v/"}},
+     "must differ"),
     ({"upstream": {"host": "a"}, "listen": []}, "at least one listener"),
     ({"upstream": {"host": "a"}, "listen": [{"port": 8883}, {"port": 8883}]}, "twice"),
 ])
