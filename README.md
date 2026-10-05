@@ -48,6 +48,13 @@ Rules can match on:
 All conditions in a rule must hold, and any rule in a `match` list selects the upstream.
 Some devices send no SNI, so add a `client_id` or `username` rule for those.
 
+Rules can also match on `port`, the proxy port the device connected to. `listen` is a
+list, so the proxy can serve every port your vendors use, for example 8883 with TLS and
+1883 with `tls: false`. An upstream without a `port` connects to the same port the
+device used, and `tls: false` on an upstream relays plain MQTT to the cloud. On a plain
+listener the device's credentials cross your LAN unencrypted, as they already do
+between that device and its cloud.
+
 Use `{vendor}` in `local_broker.topic_prefix` (e.g. `"{vendor}/{client_id}/"`) to keep
 the local topics apart. An upstream can also set its own `cert`/`key`, which is shown
 to devices whose SNI matches it.
@@ -69,7 +76,8 @@ The E2E suite starts a fake "cloud" Mosquitto (TLS + password auth, test CA), a 
 Mosquitto, and the proxy in-process. It checks QoS 0/1/2 over 3.1.1 and 5.0, retain,
 v5 topic aliases plus a 300 kB payload, that a bad-password CONNACK reaches the client,
 that cloud delivery continues while the local broker is down, and routing between two
-fake vendor clouds by SNI and by client_id, including per-vendor certificates.
+fake vendor clouds by SNI, client_id and listening port (TLS and plain), including
+per-vendor certificates.
 
 ## Known limits
 

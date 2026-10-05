@@ -51,6 +51,8 @@ def test_single_mapping_match_is_list_and_sni_normalized():
     ({"upstreams": [{"host": "a", "cert": "x.crt"}]}, "together"),
     ({"upstreams": [{"port": 1}]}, "host is required"),
     ({"upstream": {"host": "a"}, "local_broker": {"topic_prefix": "{vendr}/"}}, "placeholder"),
+    ({"upstream": {"host": "a"}, "listen": []}, "at least one listener"),
+    ({"upstream": {"host": "a"}, "listen": [{"port": 8883}, {"port": 8883}]}, "twice"),
 ])
 def test_config_errors(data, msg):
     with pytest.raises(ConfigError, match=msg):
@@ -95,3 +97,43 @@ def test_for_sni_ignores_non_sni_rules():
     assert r.for_sni("broker.vendor-b.example").name == "b"
     assert r.for_sni("shared.example").name == "c"   # SNI part of an AND rule
     assert r.for_sni("VB-1") is None                  # client_id rule is not an SNI rule
+
+
+# --- listeners and ports ----------------------------------------------------
+
+def test_listen_mapping_is_list_and_upstream_port_defaults_to_device_port():
+    c = cfg(upstream={"host": "a"}, listen={"port": 1883, "tls": False})
+    assert [(ln.port, ln.tls) for ln in c.listen] == [(1883, False)]
+    assert c.upstreams[0].port is None and c.upstreams[0].tls
+
+
+def test_listen_default_is_tls_8883():
+    c = cfg(upstream={"host": "a"})
+    assert [(ln.port, ln.tls) for ln in c.listen] == [(8883, True)]
+
+
+def test_same_port_on_different_hosts_is_allowed():
+    c = cfg(upstream={"host": "a"}, listen=[{"host": "192.0.2.1", "port": 8883},
+                                            {"host": "192.0.2.2", "port": 8883}])
+    assert len(c.listen) == 2
+
+
+def test_select_by_port():
+    c = from_dict({"upstreams": [
+        {"name": "tls", "host": "a", "match": {"port": 8883}},
+        {"name": "plain", "host": "b", "match": {"port": [1883, 1884]}},
+        {"name": "both", "host": "c", "match": {"port": 8884, "client_id": "^X"}},
+    ]})
+    r = Router(c)
+    assert c.upstreams[0].match[0].port == [8883]
+
+    def pick(port, cid="d"):
+        up = r.select(None, cid, None, port)
+        return up.name if up else None
+
+    assert pick(8883) == "tls"
+    assert pick(1883) == "plain" and pick(1884) == "plain"
+    assert pick(8884) is None             # AND: port matches, client_id doesn't
+    assert pick(8884, "X1") == "both"
+    assert pick(9999) is None
+    assert pick(None) is None             # port unknown never matches a port rule

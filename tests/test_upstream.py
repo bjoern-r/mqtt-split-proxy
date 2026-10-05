@@ -71,3 +71,25 @@ async def test_certificate_rejected_names_reason(selfsigned):
         reader, writer = await upstream.connect(cfg, upstream.make_client_context(cfg))
         assert writer.get_extra_info("ssl_object") is not None
         writer.close()
+
+
+async def test_port_falls_back_to_device_port_and_plain_upstream():
+    async def echo(r, w):
+        w.write(await r.read(4))
+        await w.drain()
+        w.close()
+    server, port = await serve(echo)
+    async with server:
+        cfg = UpstreamConfig(host="localhost", port=None, tls=False, address="127.0.0.1",
+                             connect_timeout=1)
+        reader, writer = await upstream.connect(cfg, upstream.make_client_context(cfg), port)
+        assert writer.get_extra_info("ssl_object") is None   # plain TCP
+        writer.write(b"ping")
+        assert await reader.read() == b"ping"
+        writer.close()
+
+
+async def test_no_port_at_all():
+    cfg = UpstreamConfig(host="localhost", port=None, address="127.0.0.1")
+    with pytest.raises(upstream.UpstreamError, match="no port"):
+        await upstream.connect(cfg, upstream.make_client_context(cfg))

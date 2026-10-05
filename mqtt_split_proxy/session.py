@@ -70,6 +70,8 @@ class Session:
         self.u_writer: asyncio.StreamWriter | None = None
         peer = writer.get_extra_info("peername")
         self.peer = f"{peer[0]}:{peer[1]}" if peer else "?"
+        sock = writer.get_extra_info("sockname")
+        self.local_port: int | None = sock[1] if sock else None  # proxy port the device used
         self.info: codec.ConnectInfo | None = None
         self.route: UpstreamConfig | None = None
         # Set by the SNI callback in __main__.make_server_context.
@@ -111,9 +113,9 @@ class Session:
         except codec.ProtocolError as e:
             log.info("%s: undecodable CONNECT (%s), closing", self.peer, e)
             return
-        log.info("%s: CONNECT client_id=%r mqtt_level=%d keepalive=%d sni=%s",
+        log.info("%s: CONNECT client_id=%r mqtt_level=%d keepalive=%d port=%s sni=%s",
                  self.peer, self.info.client_id, self.info.version, self.info.keepalive,
-                 self.sni or "-")
+                 self.local_port, self.sni or "-")
         if self.cfg.log_credentials:
             log.info("%s: CREDENTIALS client_id=%r username=%r password=%s", self.peer,
                      self.info.client_id, self.info.username, _show(self.info.password))
@@ -121,18 +123,19 @@ class Session:
             log.debug("%s: username=%r", self.peer, self.info.username)
 
         self.route = self.proxy.router.select(self.sni, self.info.client_id,
-                                              self.info.username)
+                                              self.info.username, self.local_port)
         if self.route is None:
             self.proxy.stats.unrouted += 1
-            log.warning("%s: no upstream matches sni=%s client_id=%r and no default; closing",
-                        self.peer, self.sni or "-", self.info.client_id)
+            log.warning("%s: no upstream matches port=%s sni=%s client_id=%r and no default; "
+                        "closing", self.peer, self.local_port, self.sni or "-",
+                        self.info.client_id)
             return
-        log.info("%s: routing to %s (%s:%d)", self.peer, self.route.name,
-                 self.route.host, self.route.port)
+        log.info("%s: routing to %s (%s:%s%s)", self.peer, self.route.name, self.route.host,
+                 self.route.port or self.local_port, "" if self.route.tls else ", plain")
 
         try:
             u_reader, self.u_writer = await upstream.connect(
-                self.route, self.proxy.upstream_ctxs[self.route.name])
+                self.route, self.proxy.upstream_ctxs[self.route.name], self.local_port)
         except (upstream.UpstreamError, OSError) as e:
             self.proxy.stats.upstream_failures += 1
             log.warning("%s: upstream %s connect failed: %s", self.peer, self.route.name, e)

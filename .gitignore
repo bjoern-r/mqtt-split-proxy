@@ -2,6 +2,8 @@
 __pycache__/
 *.egg-info/
 .pytest_cache/
-config.yaml
 certs/*.crt
 certs/*.key
+# user configs (only the example is tracked)
+config*.yaml
+!config.example.yaml

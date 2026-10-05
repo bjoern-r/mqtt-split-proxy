@@ -14,7 +14,7 @@ to a local Mosquitto. See `README.md` for what it does and how it is deployed.
 | `mqtt_split_proxy/upstream.py` | Resolve the real broker via a clean resolver; verified TLS connect |
 | `mqtt_split_proxy/local_sink.py` | Bounded queue + aiomqtt publisher with reconnect |
 | `mqtt_split_proxy/config.py` | Dataclasses + YAML loader (unknown keys are errors); legacy `upstream:` is normalized into `upstreams` |
-| `mqtt_split_proxy/__main__.py` | CLI, TLS listener + SNI callback, stats loop, signal handling |
+| `mqtt_split_proxy/__main__.py` | CLI, one server per `listen` entry (TLS + SNI callback, or plain), stats loop, signal handling |
 
 ## Invariants: do not break these
 
@@ -32,7 +32,8 @@ to a local Mosquitto. See `README.md` for what it does and how it is deployed.
 5. **Credentials:** never log or `repr()` the password. `ConnectInfo.password` has
    `repr=False`. The only exception is the explicit, off-by-default `log_credentials`
    option.
-6. **Routing happens once, before upstream is dialled**, based on SNI and the CONNECT.
+6. **Routing happens once, before upstream is dialled**, based on the listening port,
+   SNI and the CONNECT.
    It must never change what is relayed. Code after loading uses `cfg.upstreams` only,
    never `cfg.upstream`.
 7. **v5 Topic Aliases** are per connection and per direction. Keep `alias_map` in

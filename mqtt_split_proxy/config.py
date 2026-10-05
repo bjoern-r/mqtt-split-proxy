@@ -19,6 +19,7 @@ class ConfigError(ValueError):
 class ListenConfig:
     host: str | list[str] = "0.0.0.0"
     port: int = 8883
+    tls: bool = True                    # false: plain MQTT (e.g. port 1883)
     cert: str = "certs/server.crt"
     key: str = "certs/server.key"
     tls_min_version: str = "TLSv1_2"
@@ -28,6 +29,7 @@ class ListenConfig:
 class MatchConfig:
     """All given conditions must hold. Unset conditions are ignored."""
     sni: str | list[str] | None = None  # glob(s) on the TLS server name, case-insensitive
+    port: int | list[int] | None = None  # proxy port the device connected to
     client_id: str | None = None        # regex, re.search
     username: str | None = None         # regex, re.search
 
@@ -36,7 +38,8 @@ class MatchConfig:
 class UpstreamConfig:
     name: str = ""                      # defaults to host; used as {vendor} in topic_prefix
     host: str = ""
-    port: int = 8883
+    port: int | None = None             # None: same port the device connected to
+    tls: bool = True                    # false: plain MQTT to the cloud
     resolver: str | list[str] | None = "1.1.1.1"
     address: str | None = None
     verify: bool = True
@@ -65,7 +68,8 @@ class LocalBrokerConfig:
 
 @dataclass
 class Config:
-    listen: ListenConfig = field(default_factory=ListenConfig)
+    # A single mapping in YAML is accepted as a one-element list.
+    listen: list[ListenConfig] = field(default_factory=lambda: [ListenConfig()])
     # Exactly one of `upstream` (single vendor) or `upstreams` may be given in
     # YAML; after loading, `upstreams` always holds the full list.
     upstream: UpstreamConfig | None = None
@@ -81,7 +85,7 @@ class Config:
 
 # (dataclass, field) -> (nested dataclass, is_list)
 _NESTED: dict[tuple[type, str], tuple[type, bool]] = {
-    (Config, "listen"): (ListenConfig, False),
+    (Config, "listen"): (ListenConfig, True),
     (Config, "upstream"): (UpstreamConfig, False),
     (Config, "upstreams"): (UpstreamConfig, True),
     (Config, "local_broker"): (LocalBrokerConfig, False),
@@ -128,10 +132,12 @@ def _check_upstream(up: UpstreamConfig, where: str) -> None:
     if (up.cert is None) != (up.key is None):
         raise ConfigError(f"{where}: cert and key must be given together")
     for i, m in enumerate(up.match):
-        if m.sni is None and m.client_id is None and m.username is None:
+        if all(v is None for v in (m.sni, m.port, m.client_id, m.username)):
             raise ConfigError(f"{where}.match[{i}]: empty rule (would match everything)")
         if isinstance(m.sni, str):
             m.sni = [m.sni]
+        if isinstance(m.port, int):
+            m.port = [m.port]
         for key in ("client_id", "username"):
             pattern = getattr(m, key)
             if pattern is not None:
@@ -143,6 +149,16 @@ def _check_upstream(up: UpstreamConfig, where: str) -> None:
 
 def from_dict(data: dict[str, Any], base_dir: Path | None = None) -> Config:
     cfg: Config = _build(Config, data, "config")
+
+    if not cfg.listen:
+        raise ConfigError("listen: at least one listener is required")
+    seen = set()
+    for i, ln in enumerate(cfg.listen):
+        hosts = [ln.host] if isinstance(ln.host, str) else ln.host
+        for h in hosts:
+            if (h, ln.port) in seen:
+                raise ConfigError(f"listen[{i}]: {h}:{ln.port} is configured twice")
+            seen.add((h, ln.port))
 
     if cfg.upstream is not None and cfg.upstreams:
         raise ConfigError("give either `upstream` or `upstreams`, not both")
@@ -173,8 +189,9 @@ def from_dict(data: dict[str, Any], base_dir: Path | None = None) -> Config:
         raise ConfigError(f"local_broker.topic_prefix: bad placeholder {e} "
                           "(allowed: {vendor}, {client_id}, {username})") from None
     if base_dir is not None:
-        cfg.listen.cert = _resolve_path(base_dir, cfg.listen.cert)
-        cfg.listen.key = _resolve_path(base_dir, cfg.listen.key)
+        for ln in cfg.listen:
+            ln.cert = _resolve_path(base_dir, ln.cert)
+            ln.key = _resolve_path(base_dir, ln.key)
         for up in cfg.upstreams:
             up.cafile = _resolve_path(base_dir, up.cafile)
             up.cert = _resolve_path(base_dir, up.cert)

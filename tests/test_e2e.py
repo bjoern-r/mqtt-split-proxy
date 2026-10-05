@@ -217,12 +217,16 @@ def upstream_to(cloud: Broker, certs: Path, **extra) -> dict:
             "verify": True, "cafile": str(certs / "ca.crt"), **extra}
 
 
+def tls_listener(certs: Path, port: int) -> dict:
+    return {"host": "127.0.0.1", "port": port,
+            "cert": str(certs / "server.crt"), "key": str(certs / "server.key")}
+
+
 @contextlib.asynccontextmanager
 async def running_proxy(certs: Path, local: Broker, **cfg_data):
     port = free_port()
     cfg = from_dict({
-        "listen": {"host": "127.0.0.1", "port": port,
-                   "cert": str(certs / "server.crt"), "key": str(certs / "server.key")},
+        "listen": tls_listener(certs, port),
         "local_broker": {"host": "127.0.0.1", "port": local.port,
                          **cfg_data.pop("local_broker", {})},
         "stats_interval": 3600,
@@ -233,7 +237,7 @@ async def running_proxy(certs: Path, local: Broker, **cfg_data):
     task = asyncio.create_task(serve(cfg, stop, started))
     p, sink, _server = await asyncio.wait_for(started, 5)
     await wait_for(lambda: sink.connected, 10, "local sink connected")
-    p.port = port
+    p.port = cfg.listen[0].port
     try:
         yield p
     finally:
@@ -462,3 +466,39 @@ async def test_per_vendor_certificate_by_sni(multi_proxy, vendor_b_cert, certs):
     with pytest.raises(ssl.SSLCertVerificationError):
         await raw_publish(multi_proxy.port, "mqtt.vendor-a.test", "dev-a", "route/c", b"1",
                           ctx=verifying(vendor_b_cert / "server.crt"))
+
+
+# --- several listening ports ------------------------------------------------
+
+async def test_listeners_on_several_ports_route_by_port(certs, cloud, cloud_b, local):
+    """TLS listener -> vendor-a (TLS cloud); plain 1883-style listener -> vendor-b,
+    relayed to vendor-b's plain MQTT port."""
+    tls_port, plain_port = free_port(), free_port()
+    async with running_proxy(
+            certs, local,
+            listen=[tls_listener(certs, tls_port),
+                    {"host": "127.0.0.1", "port": plain_port, "tls": False}],
+            upstreams=[
+                upstream_to(cloud, certs, name="vendor-a", match={"port": tls_port}),
+                {"name": "vendor-b", "host": "localhost", "address": "127.0.0.1",
+                 "port": cloud_b.plain_port, "tls": False, "match": {"port": plain_port}},
+            ],
+            local_broker={"topic_prefix": "{vendor}/{client_id}/"}) as p:
+        kw = {"username": USER, "password": PASSWORD}
+        async with collector(cloud.plain_port, "ports/#", **kw) as at_a, \
+                collector(cloud_b.plain_port, "ports/#", **kw) as at_b, \
+                collector(local.port, "+/+/ports/#") as at_local:
+            rc, out = await run_pub(p, certs, "-t", "ports/t", "-m", "via-tls")
+            assert rc == 0, out
+            proc = await asyncio.create_subprocess_exec(
+                "mosquitto_pub", "-h", "127.0.0.1", "-p", str(plain_port), "-i", CLIENT_ID,
+                "-u", USER, "-P", PASSWORD, "-t", "ports/t", "-m", "via-plain",
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            out = (await asyncio.wait_for(proc.communicate(), 20))[0].decode()
+            assert proc.returncode == 0, out
+            await wait_for(lambda: at_a and at_b and len(at_local) == 2, what="both messages")
+            await asyncio.sleep(0.3)
+    assert at_a == [("ports/t", b"via-tls", False)]
+    assert at_b == [("ports/t", b"via-plain", False)]
+    assert sorted(at_local) == [(f"vendor-a/{CLIENT_ID}/ports/t", b"via-tls", False),
+                                (f"vendor-b/{CLIENT_ID}/ports/t", b"via-plain", False)]

@@ -10,7 +10,7 @@ import signal
 import ssl
 
 from . import config as config_mod
-from .config import Config
+from .config import Config, ListenConfig
 from .local_sink import LocalSink
 from .routing import Router
 from .session import Proxy
@@ -19,21 +19,21 @@ from .upstream import make_client_context
 log = logging.getLogger("mqtt_split_proxy")
 
 
-def _server_context(cfg: Config, cert: str, key: str) -> ssl.SSLContext:
+def _server_context(listen: ListenConfig, cert: str, key: str) -> ssl.SSLContext:
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ctx.load_cert_chain(cert, key)
-    ctx.minimum_version = ssl.TLSVersion[cfg.listen.tls_min_version]
+    ctx.minimum_version = ssl.TLSVersion[listen.tls_min_version]
     if ctx.minimum_version < ssl.TLSVersion.TLSv1_2:
         # Old devices often only offer legacy ciphers as well.
         ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
     return ctx
 
 
-def make_server_context(cfg: Config, router: Router) -> ssl.SSLContext:
-    """Default context; an SNI callback records the requested server name for
+def make_server_context(cfg: Config, listen: ListenConfig, router: Router) -> ssl.SSLContext:
+    """Listener context; an SNI callback records the requested server name for
     routing and switches to an upstream's own certificate if it has one."""
-    ctx = _server_context(cfg, cfg.listen.cert, cfg.listen.key)
-    per_upstream = {u.name: _server_context(cfg, u.cert, u.key)
+    ctx = _server_context(listen, listen.cert, listen.key)
+    per_upstream = {u.name: _server_context(listen, u.cert, u.key)
                     for u in cfg.upstreams if u.cert is not None}
 
     def on_sni(sslobj: ssl.SSLObject, server_name: str | None, _ctx: ssl.SSLContext) -> None:
@@ -62,37 +62,47 @@ async def serve(cfg: Config, stop: asyncio.Event,
                 started: asyncio.Future | None = None) -> None:
     """Run the proxy until ``stop`` is set.
 
-    ``started`` (tests) receives ``(proxy, sink, server)`` once listening.
+    ``started`` (tests) receives ``(proxy, sink, servers)`` once listening.
     """
     sink = LocalSink(cfg.local_broker)
     proxy = Proxy(cfg, sink, {u.name: make_client_context(u) for u in cfg.upstreams})
-    server = await asyncio.start_server(
-        proxy.handle_client, cfg.listen.host, cfg.listen.port,
-        ssl=make_server_context(cfg, proxy.router), ssl_handshake_timeout=15)
-    addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
+    servers = []
+    try:
+        for ln in cfg.listen:
+            tls = make_server_context(cfg, ln, proxy.router) if ln.tls else None
+            server = await asyncio.start_server(
+                proxy.handle_client, ln.host, ln.port, ssl=tls,
+                ssl_handshake_timeout=15 if tls else None)
+            servers.append(server)
+            addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
+            log.info("listening on %s (%s)", addrs, "TLS" if tls else "plain MQTT")
+    except BaseException:
+        for s in servers:
+            s.close()
+        raise
     if cfg.log_credentials:
         log.warning("log_credentials is ON: device passwords will be written to the log")
-    log.info("listening on %s", addrs)
     for u in cfg.upstreams:
-        log.info("upstream %s: %s:%d%s", u.name, u.host, u.port,
-                 " (default)" if u.name == cfg.default else "")
+        log.info("upstream %s: %s:%s%s%s", u.name, u.host, u.port or "<device port>",
+                 "" if u.tls else " (plain)", " (default)" if u.name == cfg.default else "")
 
     bg = [asyncio.create_task(sink.run(), name="sink"),
           asyncio.create_task(_stats_loop(proxy, sink, cfg.stats_interval), name="stats")]
     if started is not None:
-        started.set_result((proxy, sink, server))
+        started.set_result((proxy, sink, servers))
     try:
         await stop.wait()
     finally:
         log.info("shutting down")
-        server.close()
-        if hasattr(server, "close_clients"):  # Python 3.13+
-            server.close_clients()
+        for server in servers:
+            server.close()
+            if hasattr(server, "close_clients"):  # Python 3.13+
+                server.close_clients()
         for t in bg:
             t.cancel()
         await asyncio.gather(*bg, return_exceptions=True)
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(server.wait_closed(), 5)
+            await asyncio.wait_for(asyncio.gather(*(s.wait_closed() for s in servers)), 5)
 
 
 async def _main(cfg: Config) -> None:
