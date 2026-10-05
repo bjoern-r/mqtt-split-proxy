@@ -90,6 +90,13 @@ unchanged, but that direction is then packet-framed like the other one, so a cor
 packet header from the cloud ends the session. The stats line reports `tapped_down`
 and `tap_errors_down`.
 
+## Topics starting with "/"
+
+Some devices publish to topics like `/a/b`, which locally becomes `vendor/<id>//a/b`.
+Set `local_broker.strip_leading_slash: true` to get `vendor/<id>/a/b` instead. This
+applies to both directions, and only to the local copy. The cloud still sees the
+original topic. With it on, `/a/b` and `a/b` from the same device share one local topic.
+
 ## Known limits
 
 - Cloud→device PUBLISHes are only copied with `tap_downstream: true` (see above);

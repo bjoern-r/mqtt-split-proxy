@@ -64,6 +64,7 @@ class LocalBrokerConfig:
     topic_prefix_down: str = "vendor-down/{client_id}/"  # cloud->device copies (tap_downstream)
     qos: int = 0
     strip_retain: bool = False
+    strip_leading_slash: bool = False   # "/a/b" -> prefix + "a/b" instead of prefix + "/a/b"
     queue_size: int = 10000
 
 

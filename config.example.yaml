@@ -73,6 +73,9 @@ local_broker:
   topic_prefix_down: "vendor-down/{client_id}/"
   qos: 0
   strip_retain: false
+  # Drop leading "/" from device topics, so "/a/b" becomes "vendor/<id>/a/b"
+  # instead of "vendor/<id>//a/b". Note: "/a/b" and "a/b" then share a topic.
+  strip_leading_slash: false
   queue_size: 10000
 
 connect_timeout: 30        # seconds a device may take to send its CONNECT

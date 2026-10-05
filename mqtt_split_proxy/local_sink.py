@@ -40,6 +40,9 @@ class LocalSink:
         prefix = template.format(
             vendor=self._clean(vendor), client_id=self._clean(client_id),
             username=self._clean(username or ""))
+        if self.cfg.strip_leading_slash:
+            # Some devices publish "/a/b"; avoid "prefix//a/b" locally.
+            topic = topic.lstrip("/")
         return prefix + topic
 
     def offer(self, vendor: str, client_id: str, username: str | None,
