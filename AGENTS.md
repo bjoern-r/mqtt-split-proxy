@@ -9,7 +9,7 @@ to a local Mosquitto. See `README.md` for what it does and how it is deployed.
 | File | Role |
 |---|---|
 | `mqtt_split_proxy/mqtt_codec.py` | Pure framing + CONNECT/PUBLISH decoding; raises `ProtocolError` |
-| `mqtt_split_proxy/session.py` | One device connection: two pumps (up = packet-framed + tap, down = byte copy) |
+| `mqtt_split_proxy/session.py` | One device connection: two pumps (up = packet-framed + tap, down = byte copy, or framed + tap with `tap_downstream`) |
 | `mqtt_split_proxy/routing.py` | Pick the upstream for a device from SNI + CONNECT (`Router`) |
 | `mqtt_split_proxy/upstream.py` | Resolve the real broker via a clean resolver; verified TLS connect |
 | `mqtt_split_proxy/local_sink.py` | Bounded queue + aiomqtt publisher with reconnect |
@@ -19,7 +19,8 @@ to a local Mosquitto. See `README.md` for what it does and how it is deployed.
 ## Invariants: do not break these
 
 1. **The cloud path is never modified.** Bytes from the device go upstream exactly as
-   received, and cloud→device is a plain byte copy. Never build, rewrite, reorder or
+   received, and cloud→device is a plain byte copy (or, with `tap_downstream`, the same
+   forward-first framed copy). Never build, rewrite, reorder or
    drop packets on either path. Packet IDs, QoS handshakes, sessions and v5
    properties must stay end-to-end between the device and the cloud.
 2. **The tap must not affect relaying.** Forward first, then parse. A decode error
@@ -36,8 +37,8 @@ to a local Mosquitto. See `README.md` for what it does and how it is deployed.
    SNI and the CONNECT.
    It must never change what is relayed. Code after loading uses `cfg.upstreams` only,
    never `cfg.upstream`.
-7. **v5 Topic Aliases** are per connection and per direction. Keep `alias_map` in
-   sync even for PUBLISHes that are too large to copy.
+7. **v5 Topic Aliases** are per connection and per direction. Keep `alias_map` (and
+   `alias_map_down`) in sync even for PUBLISHes that are too large to copy.
 
 ## Development
 

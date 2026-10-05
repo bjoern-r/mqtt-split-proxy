@@ -51,10 +51,12 @@ async def _stats_loop(proxy: Proxy, sink: LocalSink, interval: float) -> None:
     while True:
         await asyncio.sleep(interval)
         s = proxy.stats
-        log.info("stats: active=%d sessions=%d tapped=%d tap_errors=%d local_ok=%d "
+        log.info("stats: active=%d sessions=%d tapped=%d tap_errors=%d tapped_down=%d "
+                 "tap_errors_down=%d local_ok=%d "
                  "local_dropped=%d local_queue=%d local_connected=%s upstream_failures=%d "
                  "unrouted=%d",
-                 s.active, s.sessions, s.tapped, s.tap_errors, sink.ok, sink.dropped,
+                 s.active, s.sessions, s.tapped, s.tap_errors, s.tapped_down,
+                 s.tap_errors_down, sink.ok, sink.dropped,
                  sink.queue.qsize(), sink.connected, s.upstream_failures, s.unrouted)
 
 

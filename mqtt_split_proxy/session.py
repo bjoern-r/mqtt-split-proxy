@@ -36,6 +36,8 @@ class Stats:
     sessions: int = 0
     tapped: int = 0
     tap_errors: int = 0
+    tapped_down: int = 0
+    tap_errors_down: int = 0
     upstream_failures: int = 0
     unrouted: int = 0
 
@@ -76,11 +78,14 @@ class Session:
         self.route: UpstreamConfig | None = None
         # Set by the SNI callback in __main__.make_server_context.
         self.sni: str | None = getattr(writer.get_extra_info("ssl_object"), "sni", None)
+        # v5 Topic Aliases are per direction, so each pump keeps its own table.
         self.alias_map: dict[int, str] = {}
+        self.alias_map_down: dict[int, str] = {}
         self.bytes_up = 0
         self.bytes_down = 0
         self.publishes = 0
-        self._tap_error_logged = False
+        self.publishes_down = 0
+        self._tap_error_logged = {False: False, True: False}  # by down
 
     async def run(self) -> None:
         start = time.monotonic()
@@ -91,10 +96,11 @@ class Session:
             if self.u_writer is not None:
                 await self._close(self.u_writer)
             if self.info is not None:
-                log.info("session %s client_id=%r vendor=%s closed after %.0fs: up=%dB down=%dB publishes=%d",
+                log.info("session %s client_id=%r vendor=%s closed after %.0fs: up=%dB down=%dB "
+                         "publishes=%d publishes_down=%d",
                          self.peer, self.info.client_id,
                          self.route.name if self.route else "-", time.monotonic() - start,
-                         self.bytes_up, self.bytes_down, self.publishes)
+                         self.bytes_up, self.bytes_down, self.publishes, self.publishes_down)
 
     async def _run(self) -> None:
         try:
@@ -145,8 +151,11 @@ class Session:
         self.bytes_up += len(pkt.raw)
         await self.u_writer.drain()
 
-        tasks = [asyncio.create_task(self._pump_up(), name="up"),
-                 asyncio.create_task(self._pump_down(u_reader), name="down")]
+        down = (self._pump_framed(u_reader, self.d_writer, down=True)
+                if self.cfg.tap_downstream else self._pump_down(u_reader))
+        tasks = [asyncio.create_task(self._pump_framed(self.d_reader, self.u_writer, down=False),
+                                     name="up"),
+                 asyncio.create_task(down, name="down")]
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -160,10 +169,15 @@ class Session:
                                                        codec.ProtocolError)) else logging.ERROR
                 log.log(level, "%s: %s pump ended: %r", self.peer, t.get_name(), e)
 
-    async def _pump_up(self) -> None:
-        """device -> cloud, packet-framed, with tap."""
-        reader, writer = self.d_reader, self.u_writer
-        assert writer is not None
+    def _count(self, down: bool, n: int) -> None:
+        if down:
+            self.bytes_down += n
+        else:
+            self.bytes_up += n
+
+    async def _pump_framed(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                           down: bool) -> None:
+        """Packet-framed copy with tap: device -> cloud, or cloud -> device if ``down``."""
         tap_max = self.cfg.tap_max_packet
         while True:
             try:
@@ -176,23 +190,23 @@ class Session:
             if hdr.type == codec.PUBLISH and n <= tap_max:
                 body = await reader.readexactly(n)
                 writer.write(hdr.raw + body)
-                self.bytes_up += len(hdr.raw) + n
+                self._count(down, len(hdr.raw) + n)
                 await writer.drain()
-                self._tap(hdr.flags, body, full=True)
+                self._tap(hdr.flags, body, full=True, down=down)
                 continue
 
             writer.write(hdr.raw)
-            self.bytes_up += len(hdr.raw)
+            self._count(down, len(hdr.raw))
             first = True
             while n:
                 chunk = await reader.readexactly(min(n, CHUNK))
                 n -= len(chunk)
                 writer.write(chunk)
-                self.bytes_up += len(chunk)
+                self._count(down, len(chunk))
                 await writer.drain()
                 if first and hdr.type == codec.PUBLISH:
                     # Oversized: not copied, but keep the v5 alias table in sync.
-                    self._tap(hdr.flags, chunk, full=False)
+                    self._tap(hdr.flags, chunk, full=False, down=down)
                 first = False
             await writer.drain()
 
@@ -207,23 +221,32 @@ class Session:
             self.bytes_down += len(data)
             await writer.drain()
 
-    def _tap(self, flags: int, body: bytes, full: bool) -> None:
+    def _tap(self, flags: int, body: bytes, full: bool, down: bool = False) -> None:
         assert self.info is not None and self.route is not None
+        stats = self.proxy.stats
+        alias_map = self.alias_map_down if down else self.alias_map
         try:
-            pub = codec.parse_publish(flags, body, self.info.version, self.alias_map)
+            pub = codec.parse_publish(flags, body, self.info.version, alias_map)
         except codec.ProtocolError as e:
-            self.proxy.stats.tap_errors += 1
-            if full and not self._tap_error_logged:
-                self._tap_error_logged = True
-                log.warning("%s: cannot decode PUBLISH for local copy (%s); relaying anyway",
-                            self.peer, e)
+            if down:
+                stats.tap_errors_down += 1
+            else:
+                stats.tap_errors += 1
+            if full and not self._tap_error_logged[down]:
+                self._tap_error_logged[down] = True
+                log.warning("%s: cannot decode %s PUBLISH for local copy (%s); relaying anyway",
+                            self.peer, "cloud->device" if down else "device->cloud", e)
             return
         if not full:
             return
-        self.publishes += 1
-        self.proxy.stats.tapped += 1
+        if down:
+            self.publishes_down += 1
+            stats.tapped_down += 1
+        else:
+            self.publishes += 1
+            stats.tapped += 1
         self.proxy.sink.offer(self.route.name, self.info.client_id, self.info.username,
-                              pub.topic, pub.payload, pub.retain)
+                              pub.topic, pub.payload, pub.retain, down=down)
 
     @staticmethod
     async def _close(writer: asyncio.StreamWriter) -> None:

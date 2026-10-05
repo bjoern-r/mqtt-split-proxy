@@ -75,12 +75,24 @@ pytest tests/test_e2e.py     # needs mosquitto (or Docker + eclipse-mosquitto:2)
 The E2E suite starts a fake "cloud" Mosquitto (TLS + password auth, test CA), a "local"
 Mosquitto, and the proxy in-process. It checks QoS 0/1/2 over 3.1.1 and 5.0, retain,
 v5 topic aliases plus a 300 kB payload, that a bad-password CONNACK reaches the client,
-that cloud delivery continues while the local broker is down, and routing between two
+that cloud delivery continues while the local broker is down, that cloud→device
+PUBLISHes are copied only with `tap_downstream`, and routing between two
 fake vendor clouds by SNI, client_id and listening port (TLS and plain), including
 per-vendor certificates.
 
+## Copying cloud→device messages
+
+By default only device→cloud PUBLISHes are copied. Set `tap_downstream: true` to also
+copy what the cloud sends to the device (commands, config pushes, …) for debugging. They
+appear under `local_broker.topic_prefix_down` (default `vendor-down/{client_id}/`), so
+`mosquitto_sub -t 'vendor-down/#' -v` shows them. The bytes still reach the device
+unchanged, but that direction is then packet-framed like the other one, so a corrupt
+packet header from the cloud ends the session. The stats line reports `tapped_down`
+and `tap_errors_down`.
+
 ## Known limits
 
-- Only device→cloud PUBLISHes are copied. Cloud→device traffic is relayed but not tapped.
+- Cloud→device PUBLISHes are only copied with `tap_downstream: true` (see above);
+  otherwise that direction is a plain byte copy.
 - QoS 1/2 retransmissions (DUP) are copied again, so local delivery is at-least-once.
 - PUBLISHes larger than `tap_max_packet` are relayed but not copied.

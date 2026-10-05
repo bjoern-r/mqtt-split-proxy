@@ -251,7 +251,8 @@ async def proxy(certs, cloud, local, request):
     async with running_proxy(
             certs, local, upstream=upstream_to(cloud, certs),
             local_broker={"queue_size": overrides.get("queue_size", 1000)},
-            log_credentials=overrides.get("log_credentials", False)) as p:
+            log_credentials=overrides.get("log_credentials", False),
+            tap_downstream=overrides.get("tap_downstream", False)) as p:
         yield p
 
 
@@ -359,6 +360,57 @@ async def test_log_credentials_option(proxy, cloud, local, certs, caplog, shown)
     assert rc == 0, out
     assert (f"username='{USER}' password='{PASSWORD}'" in caplog.text) is shown
     assert ("password=" in caplog.text) is shown
+
+
+def _insecure_ctx() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+async def cloud_to_device(proxy, cloud, version, messages):
+    """Device subscribes through the proxy; the cloud side publishes ``messages``."""
+    got: list[tuple[str, bytes]] = []
+    async with aiomqtt.Client("127.0.0.1", proxy.port, username=USER, password=PASSWORD,
+                              identifier=CLIENT_ID, tls_context=_insecure_ctx(),
+                              protocol=version) as dev:
+        await dev.subscribe("cmd/#", qos=1)
+        async with aiomqtt.Client("127.0.0.1", cloud.plain_port, username=USER,
+                                  password=PASSWORD) as vendor:
+            for topic, payload in messages:
+                await vendor.publish(topic, payload, qos=1)
+        async for m in dev.messages:
+            got.append((str(m.topic), bytes(m.payload)))
+            if len(got) == len(messages):
+                break
+    return got
+
+
+@pytest.mark.parametrize("proxy", [{"tap_downstream": True}], indirect=True)
+@pytest.mark.parametrize("version", [aiomqtt.ProtocolVersion.V311, aiomqtt.ProtocolVersion.V5])
+async def test_cloud_to_device_publish_copied_locally(proxy, cloud, local, certs, version):
+    big = os.urandom(300_000)
+    messages = [("cmd/led", b"on"), ("cmd/fw", big)]
+    async with collector(local.port) as at_local:
+        got = await asyncio.wait_for(cloud_to_device(proxy, cloud, version, messages), 20)
+        await wait_for(lambda: len(at_local) == 2, what="2 local copies")
+    assert got == messages
+    pre = f"vendor-down/{CLIENT_ID}/"
+    assert [(t, p) for t, p, _ in at_local] == [(pre + "cmd/led", b"on"), (pre + "cmd/fw", big)]
+    assert proxy.stats.tapped_down == 2
+    assert proxy.stats.tapped == 0
+
+
+async def test_cloud_to_device_not_copied_by_default(proxy, cloud, local, certs):
+    async with collector(local.port) as at_local:
+        got = await asyncio.wait_for(
+            cloud_to_device(proxy, cloud, aiomqtt.ProtocolVersion.V311, [("cmd/led", b"on")]),
+            20)
+        await asyncio.sleep(0.5)
+    assert got == [("cmd/led", b"on")]
+    assert at_local == []
+    assert proxy.stats.tapped_down == 0
 
 
 # --- multi-vendor routing ---------------------------------------------------
