@@ -66,4 +66,8 @@ uv venv && uv pip install -e '.[dev]'
   ```
   Co-Authored-By: AI coding agent <noreply@example.com>
   ```
-- Never commit `config.yaml`, `certs/*.crt`/`*.key`, or real device credentials.
+- Never commit config files the user created (`config*.yaml` other than
+  `config.example.yaml`, and any other local config), `certs/*.crt`/`*.key`, or real
+  device credentials. They contain passwords and hostnames.
+- Stage files by name (`git add <file>…`), never `git add -A` / `git add .`, and
+  check `git status` for untracked files you didn't create before committing.
